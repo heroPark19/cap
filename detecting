@@ -1,0 +1,332 @@
+import torch
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+import numpy as np
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+
+def get_size():
+    # 학습한 가중치의 경로 설정
+    weights_path = 'weights/yolov5s.pt'
+    model = torch.hub.load('ultralytics/yolov5', 'custom', path=weights_path)
+
+    # Images
+    img = 'https://ultralytics.com/images/zidane.jpg'  # or file, Path, PIL, OpenCV, numpy, list
+    # img = './2shot.png'
+
+    # Inference
+    results = model(img)
+
+    # Results
+    results.print()  # or .show(), .save(), .crop(), .pandas(), etc.
+    results.save()
+
+    box_areas = {}
+
+    for i, detection in enumerate(results.xyxy[0]):  # 각 바운딩 박스의 인덱스 번호와 함께 순회
+        class_name = results.names[int(detection[5])]  # 클래스 이름을 가져옴
+        confidence = detection[4]  # 탐지된 객체의 확률
+        x_min, y_min, x_max, y_max = detection[:4]  # 바운딩 박스의 좌표
+
+        # 바운딩 박스의 넓이 계산
+        box_width = x_max - x_min
+        box_height = y_max - y_min
+        box_area = box_width * box_height
+
+        # 각 바운딩 박스마다 동적 변수명 생성하여 넓이 할당
+        box_areas[f"box_area_{i + 1}"] = box_area
+#   print(box_areas['box_area_1'])
+
+    return box_areas['box_area_1']  # box_area_1 값을 반환
+
+def weight_predict(area1):
+    # 주어진 부표 데이터 (여기를 우리가 학습시킬 부표의 넓이별 무게 데이터를 넣어줘야 함)
+    buoy_data = {
+        'Width': [267600, 267610, 267620, 267630, 267640, 267650, 267660, 267670, 267680],
+        'Weight': [5, 16, 32, 41, 56, 78, 89, 98, 115]
+    }
+
+    # 데이터프레임 생성
+    buoy_df = pd.DataFrame(buoy_data)
+
+    # 입력 변수와 타겟 변수 설정
+    buoy_input = buoy_df[['Width']]  # 넓이(Width)를 입력 변수로 사용
+    buoy_target = buoy_df['Weight']  # 무게(Weight)를 타겟 변수로 사용
+
+    # 선형 회귀 모델 생성 및 학습
+    lr_model = LinearRegression()
+    lr_model.fit(buoy_input, buoy_target)
+
+    # 넓이에 따른 무게 예측
+    width_to_predict = [[width] for width in range(10, 51)]  # 부표 넓이에 대한 예측 (range에는 부표 넓이의 범위를 넣어야 함)
+    predicted_weight = lr_model.predict(width_to_predict)
+
+    # 산점도(Scatter plot) 그리기
+    plt.scatter(buoy_df['Width'], buoy_df['Weight'], color='blue', label='Data')
+
+    # 선형 회귀 모델이 예측한 결과 그리기
+    plt.plot(range(10, 51), predicted_weight, color='red', linestyle='-', label='Linear Regression')
+
+    # 새로운 넓이 값에 대한 무게 예측
+    new_width = area1  # 욜로에서 측정한 넓이값을 여기 넣어줘야함 (변수가 직접오든,, 파일이 오든,,)
+    predicted_value = lr_model.predict([[new_width]])  # 이 변수에 예측값이 저장 됨.
+
+    print(f"해당부표의 예측 무게 : {predicted_value[0]:.2f} kg")  # .2f는 소수점 을 정해준거임
+    return predicted_value
+
+def best_date_predict(weight) :
+    days_1 = np.array([1, 5, 10, 15, 20]).reshape(-1, 1) #임의의 데이터임. 우리가 직접 얻은 데이터를 넣으면 될 듯 가정이나
+    weights_1 = np.array([5, 13, 27, 39, 56])
+
+    days_2 = np.array([1, 5, 10, 15, 20]).reshape(-1, 1)
+    weights_2 = np.array([7, 15, 26, 39, 60])
+
+    days_3 = np.array([1, 5, 10, 15, 20]).reshape(-1, 1)
+    weights_3 = np.array([6, 19, 31, 45, 57])
+
+    # 다중 선형 회귀 모델 생성
+    model_1 = LinearRegression()
+    model_2 = LinearRegression()
+    model_3 = LinearRegression()
+
+    # 모델 1 훈련
+    model_1.fit(days_1, weights_1)
+    # 모델 2 훈련
+    model_2.fit(days_2, weights_2)
+    # 모델 3 훈련
+    model_3.fit(days_3, weights_3)
+
+    data_list = [(days_1, weights_1), (days_2, weights_2), (days_3, weights_3)]
+    model_list = [model_1, model_2, model_3]
+
+    # 예측함수
+    def predict_growth(models, current_weight, target_weight):
+        days_to_target = 0
+        weight = current_weight
+        while weight < target_weight:
+            days_to_target += 1
+            for i, (days, weights) in enumerate(data_list):
+                next_day = days_to_target + days[-1]
+                weight = models[i].predict(np.array([next_day]).reshape(1, -1)).flatten()[0]  # 입력을 2차원 배열로 변환
+                if weight >= target_weight:
+                    break
+        return days_to_target, weight
+
+    # 현재 무게와 목표 무게 입력
+    current_weight = weight
+    target_weight = 100 #최적의 무게 (가정)
+
+    # 성장 예측
+    days_to_target, final_weight = predict_growth([model_1, model_2, model_3], current_weight, target_weight)
+    print("최적의 수확시기 예측 :", days_to_target,"일 후")
+    return days_to_target
+
+
+def Temp_predict(best_date):
+    now = datetime.now()
+    current_month = now.strftime("%m")
+    current_day = now.day
+    count = 0
+
+    #현재 수온을 크롤링 (통영 실시간 수온 크롤링 필요)
+    # source = requests.get('https://www.badatime.com/t-41.html')
+    # soup = BeautifulSoup(source.content, "html.parser")
+    # table = soup.find('table', {'id': '테이블명을 찾아야 함'})
+    # 변수에 현재 수온을 저장해야함 (float형태로)
+
+    if (30 - current_day) >= best_date:
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2023-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        min_2023 = []  # 최저 온도 배열
+        max_2023 = []  # 최고 온도 배열
+
+        rows = table.find_all('tr')[1:best_date + 1]  # 첫 번째 행은 제외하고 best_date만큼만 저장.
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2023.append(min_value)
+                max_2023.append(max_value)
+    else:
+        min_2023 = []
+        max_2023 = []
+
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2023-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[best_date:31]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2023.append(min_value)
+                max_2023.append(max_value)
+
+        source = requests.get(
+            f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2023-{(int(current_month) + 1):02d}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[1:best_date - current_day + 1]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2023.append(min_value)
+                max_2023.append(max_value)
+
+    if (30 - current_day) >= best_date:
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2022-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        min_2022 = []  # 최저 온도 배열
+        max_2022 = []  # 최고 온도 배열
+
+        rows = table.find_all('tr')[1:best_date + 1]  # 첫 번째 행은 제외하고 best_date만큼만 저장.
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2022.append(min_value)
+                max_2022.append(max_value)
+    else:
+        min_2022 = []
+        max_2022 = []
+
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2022-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[best_date:31]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2022.append(min_value)
+                max_2022.append(max_value)
+
+        source = requests.get(
+            f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2022-{(int(current_month) + 1):02d}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[1:best_date - current_day + 1]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2022.append(min_value)
+                max_2022.append(max_value)
+
+    if (30 - current_day) >= best_date:
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2021-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        min_2021 = []  # 최저 온도 배열
+        max_2021 = []  # 최고 온도 배열
+
+        rows = table.find_all('tr')[1:best_date + 1]  # 첫 번째 행은 제외하고 best_date만큼만 저장.
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2021.append(min_value)
+                max_2021.append(max_value)
+    else:
+        min_2021 = []
+        max_2021 = []
+
+        source = requests.get(f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2021-{current_month}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[best_date:31]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2021.append(min_value)
+                max_2021.append(max_value)
+
+        source = requests.get(
+            f'https://www.badatime.com/temp_past.jsp?idx=41&param=DT_0014&date1=2021-{(int(current_month) + 1):02d}')
+        soup = BeautifulSoup(source.content, "html.parser")
+        table = soup.find('table', {'id': 'table1'})
+
+        rows = table.find_all('tr')[1:best_date - current_day + 1]
+        for row in rows:
+            # 각 행의 셀을 찾습니다. 첫 번째 열은 무시합니다.
+            cells = row.find_all('td')
+            # 각 행의 세 번째 열과 다섯 번째 열의 값을 변수에 저장합니다.
+            if len(cells) >= 5:
+                min_value = float(cells[2].text.strip().replace('℃', ''))
+                max_value = float(cells[4].text.strip().replace('℃', ''))
+                min_2021.append(min_value)
+                max_2021.append(max_value)
+
+    avg_2023 = [round((x + y) / 2, 2) for x, y in zip(min_2023, max_2023)]
+    avg_2022 = [round((x + y) / 2, 2) for x, y in zip(min_2022, max_2022)]
+    avg_2021 = [round((x + y) / 2, 2) for x, y in zip(min_2021, max_2021)]
+
+    a = avg_2023[-1] - avg_2023[0]
+    b = avg_2022[-1] - avg_2022[0]
+    c = avg_2021[-1] - avg_2021[0]
+
+    change_rate = (a + b + c) / 3 / 30
+
+    # 입력된 초기 값
+    real_time_temp = 24.7  # 여기 통영 실시간 수온을 크롤링 해서 넣어야 함.
+
+    # 초기 값의 변화 예측 (한 달 동안의 변화)
+    predicted_values = []
+    for _ in range(best_date):
+        real_time_temp += change_rate
+        predicted_values.append(real_time_temp)
+
+    # 결과 출력
+    for day, value in enumerate(predicted_values, start=1):
+        if value >= 25:
+            print(day, "일 뒤")
+            count += 1
+    if count == 0:
+        print("수온은 적조현상에 대해 안정권입니다.")
+    else:
+        print("적조 현상을 주의해야 합니다.")
+
+
+
+size = get_size()
+weight = weight_predict(size)
+best_date = best_date_predict(weight)
+Temp_predict(best_date)
